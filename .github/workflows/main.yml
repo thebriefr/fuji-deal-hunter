@@ -4,7 +4,7 @@ on:
   schedule:
     # Runs every hour. For 30-min intervals, change to: */30 * * * *
     # (30-min requires a public repo to stay within GitHub's free tier)
-    - cron: "0 * * * *"
+    - cron: "*/15 * * * *"
   workflow_dispatch:  # Allows manual trigger from the Actions tab
 
 permissions:
