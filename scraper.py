@@ -365,11 +365,12 @@ def send_heartbeat():
 # ─────────────────────────────────────────────────────────────
 
 # ── 1. eBay ──────────────────────────────────────────────────
-# Reliability: 8/10
-# Sellers filtered to ≥20 feedback. Largest inventory by far.
-# Note: eBay occasionally serves CAPTCHA but rarely for simple searches.
+# Reliability: 9/10
+# Uses eBay's RSS feed — same data that powers eBay's own saved search alerts.
+# Much more reliable than HTML scraping. Sellers ≥20 feedback via _minfdbk.
 
 def scrape_ebay() -> list:
+    import xml.etree.ElementTree as ET
     listings = []
     queries = [("fujifilm x10", "x10"), ("fujifilm x20", "x20"), ("fujifilm x30", "x30")]
 
@@ -378,44 +379,42 @@ def scrape_ebay() -> list:
             f"https://www.ebay.com/sch/i.html?"
             f"_nkw={quote_plus(query)}"
             f"&LH_ItemCondition=3000"   # Used
-            f"&_sop=10"                 # Sort: newest first
-            f"&_ipg=48"                 # 48 results per page
-            f"&_minfdbk=20"             # Seller ≥20 feedback score
-            f"&LH_Complete=0"           # Exclude completed/sold
+            f"&_sop=10"                 # Newest first
+            f"&_minfdbk=20"             # Seller ≥20 feedback
+            f"&LH_Complete=0"           # Active listings only
+            f"&_rss=1"                  # RSS feed output
         )
         try:
             resp = requests.get(url, headers=HEADERS, timeout=20)
-            soup = BeautifulSoup(resp.text, "html.parser")
+            root = ET.fromstring(resp.text)
+            ns   = {"media": "http://search.yahoo.com/mrss/"}
 
-            for item in soup.select("li.s-item"):
+            for item in root.findall(".//item"):
                 try:
-                    title_el = item.select_one(".s-item__title")
-                    price_el = item.select_one(".s-item__price")
-                    link_el  = item.select_one("a.s-item__link")
-                    img_el   = item.select_one("img.s-item__image-img")
-                    loc_el   = item.select_one(".s-item__location")
-                    # Best offer: eBay puts it in the purchase options span
-                    offer_el = item.select_one(".s-item__purchase-options-with-icon")
+                    title = (item.findtext("title") or "").strip()
+                    href  = (item.findtext("link") or "").strip()
+                    desc  = item.findtext("description") or ""
 
-                    if not title_el or not link_el:
-                        continue
-                    title = title_el.get_text(strip=True)
-                    if "Shop on eBay" in title or not title:
+                    if not title or not href:
                         continue
                     if is_accessory(title):
                         continue
 
                     model = detect_model(title) or hint_model
-                    href  = re.sub(r"\?.*", "", link_el.get("href", ""))
-                    price = extract_price(price_el.get_text() if price_el else "")
-                    loc   = loc_el.get_text(strip=True).replace("From ", "") if loc_el else ""
-
+                    price = extract_price(title) or extract_price(desc)
                     if price and price > MAX_BUDGET * 1.3:
                         continue
 
-                    has_offers = bool(offer_el) or bool(
-                        re.search(r"best offer|make offer", item.get_text(), re.I)
-                    )
+                    href = re.sub(r"\?.*", "", href)
+                    has_offers = bool(re.search(r"best offer|make offer", desc, re.I))
+
+                    # Location from description
+                    loc_match = re.search(r"located in ([^<\n,]+)", desc, re.I)
+                    loc = loc_match.group(1).strip() if loc_match else ""
+
+                    # Thumbnail
+                    img_el = item.find("media:thumbnail", ns)
+                    img    = img_el.get("url", "") if img_el is not None else ""
 
                     deal = analyze_deal(model, price, has_offers=has_offers,
                                         location_text=title + " " + loc)
@@ -426,15 +425,15 @@ def scrape_ebay() -> list:
                         "price":      price,
                         "source":     "eBay",
                         "location":   loc,
-                        "image":      (img_el.get("src") or img_el.get("data-src", "")) if img_el else "",
+                        "image":      img,
                         "has_offers": has_offers,
                         "deal":       deal,
                     })
                 except Exception:
                     continue
-            time.sleep(2.5)
+            time.sleep(2)
         except Exception as e:
-            print(f"  [eBay] {query}: {e}")
+            print(f"  [eBay RSS] {query}: {e}")
     return listings
 
 
@@ -522,11 +521,12 @@ def scrape_reddit() -> list:
 
 
 # ── 3. Craigslist ────────────────────────────────────────────
-# Reliability: 8/10
-# 5 SoCal regions covering ~50mi from 90278.
-# CL rarely blocks scrapers. Both old + new HTML layouts handled.
+# Reliability: 9/10
+# Uses Craigslist's RSS feed — same feed powering CL's own email alerts.
+# More reliable than HTML scraping. 5 SoCal regions covering ~50mi from 90278.
 
 def scrape_craigslist() -> list:
+    import xml.etree.ElementTree as ET
     listings = []
     regions = [
         ("losangeles",   "Los Angeles, CA"),
@@ -539,39 +539,28 @@ def scrape_craigslist() -> list:
         for query in ["fujifilm x10", "fujifilm x20", "fujifilm x30"]:
             url = (
                 f"https://{subdomain}.craigslist.org/search/pho?"
-                f"query={quote_plus(query)}&sort=date"
+                f"query={quote_plus(query)}&sort=date&format=rss"
             )
             try:
                 resp = requests.get(url, headers=HEADERS, timeout=15)
-                soup = BeautifulSoup(resp.text, "html.parser")
+                root = ET.fromstring(resp.content)
 
-                # New CL layout
-                items = soup.select("li.cl-search-result")
-                # Fallback: old CL layout
-                if not items:
-                    items = soup.select(".result-row")
-
-                for item in items[:20]:
+                for item in root.findall(".//item"):
                     try:
-                        # New layout
-                        title_el = item.select_one(".label") or item.select_one("a.cl-app-anchor .label")
-                        link_el  = item.select_one("a.cl-app-anchor") or item.select_one("a.result-title")
-                        price_el = item.select_one(".priceinfo") or item.select_one(".result-price")
+                        title = (item.findtext("title") or "").strip()
+                        href  = (item.findtext("link") or "").strip()
+                        desc  = item.findtext("description") or ""
 
-                        if not link_el:
+                        if not title or not href:
                             continue
-                        title = (title_el or link_el).get_text(strip=True)
                         if is_accessory(title):
                             continue
+
                         model = detect_model(title)
                         if not model:
                             continue
 
-                        href = link_el.get("href", "")
-                        if not href.startswith("http"):
-                            href = f"https://{subdomain}.craigslist.org{href}"
-
-                        price = extract_price(price_el.get_text() if price_el else "")
+                        price = extract_price(title) or extract_price(desc)
                         if price and price > MAX_BUDGET * 1.3:
                             continue
 
@@ -589,9 +578,9 @@ def scrape_craigslist() -> list:
                         })
                     except Exception:
                         continue
-                time.sleep(2)
+                time.sleep(1.5)
             except Exception as e:
-                print(f"  [Craigslist] {subdomain}/{query}: {e}")
+                print(f"  [Craigslist RSS] {subdomain}/{query}: {e}")
     return listings
 
 
