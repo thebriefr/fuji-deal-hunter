@@ -128,11 +128,13 @@ def url_id(url: str) -> str:
 
 def detect_model(text: str) -> str | None:
     t = text.lower()
-    if re.search(r"\bx[-\s]?30\b", t) or "x30" in t:
+    # Must match x10/x20/x30 as a standalone model — not x100, x100v, x100vi, x1000, etc.
+    # \b ensures word boundary so "x10" doesn't match inside "x100" or "x1000"
+    if re.search(r"\bx[-\s]?30\b", t):
         return "x30"
-    if re.search(r"\bx[-\s]?20\b", t) or "x20" in t:
+    if re.search(r"\bx[-\s]?20\b", t):
         return "x20"
-    if re.search(r"\bx[-\s]?10\b", t) or "x10" in t:
+    if re.search(r"\bx[-\s]?10\b", t):
         return "x10"
     return None
 
