@@ -1,20 +1,29 @@
 #!/usr/bin/env python3
 """
-Fujifilm X10 / X20 / X30 Deal Hunter  v2
+Fujifilm X10 / X20 / X30 Deal Hunter  v3
 =========================================
-Sources  : eBay, Reddit (r/photomarket + r/analog + r/fujifilm),
-           Craigslist (5 SoCal regions), Fred Miranda B&S,
-           Mercari, Swappa, OfferUp, Poshmark, KEH Camera
-Budget   : $350 max
+Active sources (reliable):
+  - eBay (sellers ≥20 feedback)
+  - Reddit r/photomarket, r/analog, r/fujifilm
+  - Craigslist LA, Long Beach, OC, Ventura, Inland Empire
+  - Fred Miranda Buy & Sell
+  - Mercari (best-effort, JS-rendered)
+
+Inactive/removed: Swappa, OfferUp, Poshmark, KEH
+  (wrong audience, broken APIs, or prices above budget)
+
+Budget   : $375 max
 Home ZIP : 90278 (Redondo Beach, CA)
 Alerts   : Discord webhook
 """
 
 import os, json, re, time, hashlib
 import requests
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from bs4 import BeautifulSoup
 from urllib.parse import quote_plus
+
+PDT = timezone(timedelta(hours=-7))
 
 # ─────────────────────────────────────────────────────────────
 # CONFIG
@@ -256,7 +265,7 @@ def send_discord(listing: dict):
         "url":    listing.get("url", ""),
         "color":  color,
         "fields": fields,
-        "footer": {"text": f"Fuji Deal Hunter • {datetime.now().strftime('%b %d %Y, %I:%M %p PT')}"},
+        "footer": {"text": f"Fuji Deal Hunter • {datetime.now(PDT).strftime('%b %d %Y, %I:%M %p')} PDT"},
     }
     if listing.get("image"):
         embed["thumbnail"] = {"url": listing["image"]}
@@ -283,8 +292,8 @@ def send_heartbeat():
     """Once-daily ping so you know the bot is alive."""
     if not DISCORD_WEBHOOK:
         return
-    now = datetime.now()
-    # Only send at the first run of each day (between 8–9 AM)
+    now = datetime.now(PDT)
+    # Send once daily at ~8am PDT
     if now.hour != 8:
         return
     payload = {
@@ -1035,10 +1044,6 @@ def main():
         ("Craigslist (5 regions)",scrape_craigslist),
         ("Fred Miranda B&S",      scrape_fred_miranda),
         ("Mercari",               scrape_mercari),
-        ("Swappa",                scrape_swappa),
-        ("OfferUp (50mi/90278)",  scrape_offerup),
-        ("Poshmark",              scrape_poshmark),
-        ("KEH Camera",            scrape_keh),
     ]
     # NOTE — Facebook Marketplace requires login and cannot be scraped.
     # Search manually: https://www.facebook.com/marketplace/search/?query=fujifilm+x10
