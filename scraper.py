@@ -100,20 +100,26 @@ FM_SKIP_TITLES = [
 # UTILITIES
 # ─────────────────────────────────────────────────────────────
 
-def load_seen() -> set:
+def load_seen() -> dict:
+    """Returns {listing_id: last_known_price} — price is None if unknown."""
     if os.path.exists(SEEN_FILE):
         try:
             with open(SEEN_FILE) as f:
                 data = json.load(f)
-                return set(data if isinstance(data, list) else data.get("ids", []))
+                # Migrate old format (list of IDs) to new dict format
+                if isinstance(data, list):
+                    return {lid: None for lid in data}
+                return data
         except Exception:
             pass
-    return set()
+    return {}
 
 
-def save_seen(seen: set):
+def save_seen(seen: dict):
+    # Keep last 3000 entries
+    trimmed = dict(list(seen.items())[-3000:])
     with open(SEEN_FILE, "w") as f:
-        json.dump(sorted(seen)[-3000:], f, indent=2)
+        json.dump(trimmed, f, indent=2)
 
 
 def url_id(url: str) -> str:
@@ -279,6 +285,44 @@ def send_discord(listing: dict):
         print(f"  [DRY RUN] {title} — {price_str} ({listing.get('source')})")
         return
 
+    try:
+        r = requests.post(DISCORD_WEBHOOK, json=payload, timeout=10)
+        if r.status_code not in (200, 204):
+            print(f"  Discord error {r.status_code}: {r.text[:200]}")
+        time.sleep(1.2)
+    except Exception as e:
+        print(f"  Discord error: {e}")
+
+
+def send_price_drop(listing: dict, old_price: float, new_price: float):
+    """Alert when a previously seen listing drops in price."""
+    deal  = listing.get("deal") or {}
+    color = 0x00C853  # Green — always good news
+    drop  = old_price - new_price
+    pct   = round(drop / old_price * 100)
+
+    embed = {
+        "title": f"📉 Price Drop — {listing.get('title','')[:80]}",
+        "url":   listing.get("url", ""),
+        "color": color,
+        "fields": [
+            {"name": "📉 Price Change", "value": f"~~${old_price:.0f}~~ → **${new_price:.0f}** (${drop:.0f} off, {pct}% drop)", "inline": False},
+            {"name": "📷 Camera",       "value": deal.get("model", "Fujifilm X-series"), "inline": True},
+            {"name": "🏪 Source",       "value": listing.get("source", "Unknown"),        "inline": True},
+            {"name": "🎯 Verdict",      "value": deal.get("verdict", "—"),                "inline": False},
+        ],
+        "footer": {"text": f"Fuji Deal Hunter • {datetime.now(PDT).strftime('%b %d %Y, %I:%M %p')} PDT"},
+    }
+
+    if listing.get("location"):
+        flag = " ← **📍 LOCAL!**" if deal.get("local") else ""
+        embed["fields"].append({"name": "📍 Location", "value": listing["location"] + flag, "inline": False})
+
+    payload = {"username": "📷 Fuji Deal Hunter", "embeds": [embed]}
+
+    if not DISCORD_WEBHOOK:
+        print(f"  [DRY RUN] Price drop: ${old_price:.0f} → ${new_price:.0f} — {listing.get('title','')[:50]}")
+        return
     try:
         r = requests.post(DISCORD_WEBHOOK, json=payload, timeout=10)
         if r.status_code not in (200, 204):
@@ -1064,16 +1108,33 @@ def main():
 
     alert_count = 0
     for listing in all_listings:
-        lid = listing.get("id", "")
-        if not lid or lid in seen:
+        lid       = listing.get("id", "")
+        new_price = listing.get("price")
+        if not lid:
             continue
-        seen.add(lid)
-        if should_alert(listing):
-            send_discord(listing)
-            tier = (listing.get("deal") or {}).get("deal_tier", "?")
-            print(f"  ✓ [{tier}] {listing.get('title','')[:55]} — "
-                  f"${listing.get('price') or '?'} ({listing.get('source')})")
-            alert_count += 1
+
+        if lid not in seen:
+            # Brand new listing
+            seen[lid] = new_price
+            if should_alert(listing):
+                send_discord(listing)
+                tier = (listing.get("deal") or {}).get("deal_tier", "?")
+                print(f"  ✓ NEW [{tier}] {listing.get('title','')[:50]} — "
+                      f"${new_price or '?'} ({listing.get('source')})")
+                alert_count += 1
+        else:
+            # Already seen — check for price drop
+            old_price = seen[lid]
+            if (old_price is not None and new_price is not None
+                    and new_price < old_price
+                    and (old_price - new_price) >= 5):  # ignore <$5 rounding noise
+                seen[lid] = new_price
+                if should_alert(listing):
+                    send_price_drop(listing, old_price, new_price)
+                    print(f"  ↓ DROP ${old_price:.0f}→${new_price:.0f} — {listing.get('title','')[:50]}")
+                    alert_count += 1
+            elif new_price is not None:
+                seen[lid] = new_price  # Update stored price silently
 
     save_seen(seen)
     print(f"\nDone — {alert_count} alert(s) sent\n")
